@@ -18,6 +18,40 @@ import requests
 import threading
 import time
 import urllib.parse
+import docker
+from datetime import datetime, timedelta
+
+
+
+def start_container(container_name):
+    client = docker.from_env()
+    try:
+        container = client.containers.get(container_name)
+        if container.status != "running":
+            container.start()
+            print(f"Container '{container_name}' started successfully.")
+        else:
+            print(f"Container '{container_name}' is already running.")
+    except docker.errors.NotFound:
+        print(f"Container '{container_name}' not found.")
+    except docker.errors.APIError as e:
+        print(f"Error starting container: {e}")
+
+def stop_container(container_name):
+    """Stops a running Docker container by name."""
+    client = docker.from_env()
+    
+    try:
+        container = client.containers.get(container_name)
+        if container.status == "running":
+            container.stop()
+            print(f"Container '{container_name}' has been stopped.")
+        else:
+            print(f"Container '{container_name}' is not running.")
+    except docker.errors.NotFound:
+        print(f"Container '{container_name}' not found.")
+    except docker.errors.APIError as e:
+        print(f"Error stopping container: {e}")
 
 def initiateAuth() -> tuple[str, str, str]:
 	response = requests.post("https://plex.tv/api/v2/pins.json?strong=true", headers = {
@@ -56,16 +90,21 @@ class PlexAlertListener(threading.Thread):
 	connectionCheckTimerInterval = 60
 	disconnectTimerInterval = 3
 	maximumIgnores = 2
+	checkDockerTimeoutMinutes = 5
+	checkDockerInterval = 30
+	
 
 	def __init__(self, token: str, serverConfig: models.config.Server):
 		super().__init__()
 		self.daemon = True
+		self.lastRenewalDocker = datetime.datetime(1970, 1, 1)
 		self.token = token
 		self.serverConfig = serverConfig
 		self.logger = LoggerWithPrefix(f"[{self.serverConfig['name']}] ")
 		self.discordIpcService = DiscordIpcService(self.serverConfig.get("ipcPipeNumber"))
 		self.updateTimeoutTimer: Optional[threading.Timer] = None
 		self.connectionCheckTimer: Optional[threading.Timer] = None
+		self.dockerCheckTimer: Optional[threading.Timer] = None
 		self.disconnectTimer: Optional[threading.Timer] = None
 		self.account: Optional[MyPlexAccount] = None
 		self.server: Optional[PlexServer] = None
@@ -97,6 +136,8 @@ class PlexAlertListener(threading.Thread):
 						self.logger.info("Listening for alerts from user '%s'", self.listenForUser)
 						self.connectionCheckTimer = threading.Timer(self.connectionCheckTimerInterval, self.connectionCheck)
 						self.connectionCheckTimer.start()
+						self.dockerCheckTimer = threading.Timer(self.checkDockerInterval, self.connectionCheck)
+						self.dockerCheckTimer.start()
 						return
 				if not self.server:
 					raise Exception("Server not found")
@@ -145,6 +186,11 @@ class PlexAlertListener(threading.Thread):
 		else:
 			self.connectionCheckTimer = threading.Timer(self.connectionCheckTimerInterval, self.connectionCheck)
 			self.connectionCheckTimer.start()
+
+	def dockerCheck(self) -> None:
+		elapsed_time = datetime.now() - self.lastRenewalDocker
+	        if elapsed_time > timedelta(minutes=TIMEOUT_MINUTES):
+	            stop_container("kasmcord")
 
 	def tryHandleAlert(self, alert: models.plex.Alert) -> None:
 		try:
@@ -223,6 +269,8 @@ class PlexAlertListener(threading.Thread):
 					sessionUsername = session.usernames[0]
 					if sessionUsername.lower() == self.listenForUser.lower():
 						self.logger.debug("Username '%s' matches '%s', continuing", sessionUsername, self.listenForUser)
+						self.lastRenewalDocker = datetime.now()
+						start_container("kasmcord")
 						break
 					self.logger.debug("Username '%s' doesn't match '%s', ignoring", sessionUsername, self.listenForUser)
 					return
